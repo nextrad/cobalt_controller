@@ -1,0 +1,209 @@
+%% BasebandChirpVector.m
+% Author: Dane du Plessis
+% This code generates the chirp pulse that is read by the Cobalt
+% controller program, ddc_multichan.
+%
+% Input: Set parameters in this script.
+% 
+% Output:    
+%
+%   FILE                DESCRIPTION
+%   WaveformTable.dat   Waveform file read by ddc_multichan
+%   RAM_LENGTH_VEC.txt  Array of lengths (in samples) of each waveform stored in the data table
+%   RAM_OFFSET_VEC.txt  Offset addresses of each waveform in the data table
+%   T_paramVec.txt      Vector containing the length in seconds of each LFM pulse.
+%            
+%
+%% Version 4
+% Date: 28 November 2017
+% Made changes to write the WaveformTable.dat directy to disk, which can be 
+% used directly by the Cobalt's controller program, ddc_multichan without
+% any changes in format.
+%
+%% Version 3
+% Date: 13 July 2016
+% <ramlength> and <ramoffset> variables must be a multiple of 8 minus 1, if this is not the
+% case there will be prolems with the waveform output. Added modifications to meet this requirements.
+%
+%% Version 2
+% Date: 12 July 2016
+% This generates waveform used in the Cobalt for NeXtRAD. This code was
+% used at Pentek Inc to develop the software for the Cobalt board.
+% Added functinality to write a bank of different waveform lengths. The
+% <ramlength> and <ramoffset> variables required by the dac output control
+% linked list are generated in a table. This is used in the linked list
+% setup.
+%
+%% Version 1
+% Date: 22 January 2016
+% Corrected lightspeed to 299 792 458 m / s
+% Added AMPLITUDE variable
+%
+%% Version 0
+% Date: ?? August 2015
+
+% Clear the stage
+clear all; close all;
+
+%% Parameters of the chirp pulse - this is all you need to set:
+f0_param = 0;   % center frequency after upconversion
+B_param = 50e6; % Bandwidth of LFM pulses.
+%T_paramVec = [0.5:1:5].*(1e-6);
+T_paramVec = [0.5:1:5].*(1e-6);
+XFER_WORD_SIZE = 32768; % This is the DAC buffer size of the Pentek. Don't exceed this maximum. If more space is required, allocate a larger buffer in ddc_multichan.c/h
+
+
+%% Physical constants, data input rate and numeric amplitude of waveforms
+c     = 299792458;  % lightspeed in [m/s]
+fs    = 180e6;      % Data input rate [samples per second]. After interpolation and upconversion of the baseband signal, the DAC output clock frequency is 720 MHz and the intermediate frequency 125 MHz
+AMPLITUDE = 2^15 - 1; % This is the digital maximum amplitude of the waveform on a 16-bit DAC.
+
+%% Data structures
+% These vectors are used in the Cobalt source file ddc_multichan. The data
+% files generated from them must be hard coded into the source and the
+% source recompiled before measurements.
+RAM_LENGTH_VEC = [];
+RAM_OFFSET_VEC = [];
+RAM_OFFSET_VEC_BLOCK = [];
+WAVEFORM_DATA_TABLE = [];
+
+
+%% Each iteration of this for loop generates a single LFM pulse and adds it to WAVEFORM_DATA_TABLE
+% WAVEFORM_DATA_TABLE is a matrix of complex values
+% Modify this to generate your own custom waveforms, but be careful to
+% ensure that the structure of the table is preserved.
+for i = 1:length(T_paramVec)
+T_param = T_paramVec(i);
+dt    = 1/fs;
+r_max = 3000; % A uncompressed pulse will have length c*T in space [m]
+%t_max = 2*r_max/c;
+t_max = T_param;
+
+% Time vector: (Set equal to pulse length for generating only the baseband
+% chirp)
+t = -t_max/2:dt:t_max/2;
+
+% Range vetor containing the range values of samples:
+r = c*t/2;
+
+% Create the chirp pulse shifted by td. It starts at time td-T/2>0=0;
+f0 = f0_param;     % center frequency after upconversion
+B  = B_param;     % This is the bandwidth at baseband from -fb to +fb
+T  = T_param;  % pulse length
+
+K = B/T;    % Chrip rate
+td = T/2;   % shifting the pulse by T/2
+rect =@(t) abs(t) <= 0.5;
+
+v_tx = real(exp(1i*2*pi.*f0*t+1i*pi.*K*t.^2)).*rect((t)/T); % Skolnik eq 8.1
+v_txa = exp(1i*2*pi.*f0*t+1i*pi.*K*t.^2).*rect((t)/T); % Skolnik eq 8.1 %v_txa= hilbert(real(v_tx));
+
+
+N = length(t)+15;  % 
+N = N-mod(N,8)-1;  % Ensures that N is a multiple of 8 minus 1.  Violating this will cause buffer overflow problems in the Cobalt DAC.
+
+% Make very sure that v_txa is a multiple of 8 samples long
+%       |<------multiple of 8, minus 1------>| |<--- 9 more zeros --->|  = multiple of 8 samples!
+v_txa = [  zeros(1,-1+N-length(v_txa)) v_txa          zeros(1,10)     ]; % pad v_txa with a few zeros
+
+length(v_txa);
+
+% Build up the ram length and offset parameters:
+if i == 1
+RAM_OFFSET_VEC       = [                       7                            ]; % 7 is the minimum ram_offset value
+else
+RAM_OFFSET_VEC       = [RAM_OFFSET_VEC         (sum(RAM_OFFSET_VEC_BLOCK)-1)]; % the length of this is always a multiple of 8, minus 1.
+end
+RAM_OFFSET_VEC_BLOCK = [RAM_OFFSET_VEC_BLOCK   length(v_txa)                ]; % the length of this is always a multiple of 8
+RAM_LENGTH_VEC       = [RAM_LENGTH_VEC         N                            ];
+WAVEFORM_DATA_TABLE  = [WAVEFORM_DATA_TABLE    v_txa                        ];
+
+if length(WAVEFORM_DATA_TABLE)>XFER_WORD_SIZE
+    sprintf('WAVEFORM_DATA_TABLE size exceeds XFER_WORD_SIZE.\nThe buffer is only 32K samples long.\nTo get around this, reduce your waveform table size, or program the Cobalt to use a larger buffer.')
+    return
+end
+
+end
+
+
+%% Split the I and Q components into separate real-valued vectors from WAVEFORM_DATA_TABLE
+IComponent=round([real(WAVEFORM_DATA_TABLE) 0].*(AMPLITUDE));
+IComponent= [IComponent zeros(1, XFER_WORD_SIZE-length(IComponent))];
+
+QComponent=round([imag(WAVEFORM_DATA_TABLE) 0].*(AMPLITUDE));
+QComponent= [QComponent zeros(1, XFER_WORD_SIZE-length(QComponent))];
+
+%% Write data files to disk
+% Note: The first line in each of these files contais the number of
+% elements in the list (helpful when initialising the arrays in the C
+% source file ddc_multichan.c
+dlmwrite('./RAM_LENGTH_VEC.txt',length(RAM_LENGTH_VEC),'delimiter','\n');
+dlmwrite('./RAM_LENGTH_VEC.txt',RAM_LENGTH_VEC,'delimiter',',', '-append');
+
+dlmwrite('./RAM_OFFSET_VEC.txt',length(RAM_OFFSET_VEC),'delimiter','\n');
+dlmwrite('./RAM_OFFSET_VEC.txt',RAM_OFFSET_VEC,'delimiter',',', '-append');
+
+dlmwrite('./T_paramVec.txt',length(T_paramVec),'delimiter','\n');
+dlmwrite('./T_paramVec.txt',T_paramVec,'delimiter',',', '-append');
+
+
+%dlmwrite('./IData.txt',IComponent,'delimiter','\n','precision',10);
+%dlmwrite('./QData.txt',QComponent,'delimiter','\n','precision',10);
+
+
+%% Write WaveformTable.dat to disk
+% This part of the script generates 32-bit words which contain the I and Q
+% components of each sample. The format of each sample is as follows
+%
+% 0xQQQQIIII (hex)
+%
+% where the most significant (QQQQ) and least significant (IIII) 16-bit 
+% halves are the 2's complement representation of the waveform value
+% at that sample.
+
+v = bitshift(int32(QComponent),16);
+w = bitand(int32(IComponent),2^16-1);
+waveformData = bitor(v,w);
+
+dataFile = fopen('WaveformTable.dat','w');
+write = sprintf('int swTable[]={ \n');
+fwrite(dataFile,write);
+for i = 1:length(waveformData)
+    write = sprintf('%d',waveformData(i));    
+    fwrite(dataFile,write);
+    if(i < length(waveformData))
+        fwrite(dataFile,sprintf(',\n'));
+    end
+end
+write = sprintf('};\n');
+fwrite(dataFile,write);
+
+fclose(dataFile);
+
+%% Plot the waveforms generated
+% I components in blue, Q components in red. Samples indexed as they are in
+% the array generated in ddc_multichan.
+figure; hold on;
+plot(0:length(IComponent)-1,IComponent, 'r');
+hold on; 
+plot(0:length(IComponent)-1,QComponent, 'b');
+
+
+%% Plot waveform spectra
+return
+L = length(v_tx);     % Length of signal
+NFFT = 2^nextpow2(L); % Next power of 2 from length of y
+f_d= fs/2*linspace(0,1,NFFT/2+1);
+V_tx = fftshift(fft(v_tx,NFFT)/L);
+%V_txa = fftshift(fft(v_txa,NFFT)/L);
+V_txa = fftshift(fft((v_txa),NFFT)/L);
+f_full = linspace(-fs/2,fs/2,NFFT);
+
+
+figure
+subplot(2,1,1);
+plot(f_full,20*log10(abs(V_tx)));
+title('Real Spectrum');
+subplot(2,1,2);
+plot(f_full,20*log10(abs(V_txa)));
+title('Analytic Spectrum');

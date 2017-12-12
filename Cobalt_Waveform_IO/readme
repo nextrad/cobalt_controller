@@ -1,0 +1,11 @@
+BasebandChirpVector.m and PlotRawData.m generate the data files needed for the Cobalt controller program ddc_multichan.out.
+
+Input: None. Specify waveform parameters in BasebandChirpVector.m to generate the waveforms required.
+
+Output: The following data files:
+
+RAM_LENGTH_VEC.txt
+RAM_OFFSET_VEC.txt
+T_paramVec.txt
+
+Place these files in the ../RAMdataTable/ directory where ddc_multichan will search for them.
